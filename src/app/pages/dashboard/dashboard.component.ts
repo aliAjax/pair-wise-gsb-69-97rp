@@ -11,8 +11,8 @@ import {
   RISK_LABELS,
   ResourceType,
   STATUS_LABELS,
-  validateChange,
 } from '../../models/change-request.model';
+import { validateFullReview } from '../../models/review-constraints';
 import { ChangeRequestActions } from '../../store/change-request.actions';
 import {
   selectAllChanges,
@@ -101,11 +101,7 @@ import {
         </clr-select-container>
         <clr-select-container>
           <label>资源类型</label>
-          <select
-            clrSelect
-            [ngModel]="resourceType()"
-            (ngModelChange)="resourceType.set($event)"
-          >
+          <select clrSelect [ngModel]="resourceType()" (ngModelChange)="resourceType.set($event)">
             <option value="all">全部资源</option>
             @for (item of resourceTypes; track item.value) {
               <option [value]="item.value">{{ item.label }}</option>
@@ -146,7 +142,9 @@ import {
                   </a>
                 </td>
                 <td>
-                  <span class="status" [class]="change.status">{{ statusLabel(change.status) }}</span>
+                  <span class="status" [class]="change.status">{{
+                    statusLabel(change.status)
+                  }}</span>
                 </td>
                 <td>
                   <span class="risk" [class]="change.risk">{{ riskLabel(change.risk) }}</span>
@@ -353,6 +351,12 @@ import {
         background: #e8f5ed;
       }
 
+      .status.standby {
+        border-color: #b08d2e;
+        color: #6e5400;
+        background: #fbf3da;
+      }
+
       .status.submitted {
         border-color: #5688a5;
         color: #215a78;
@@ -457,12 +461,14 @@ export class DashboardComponent {
   readonly blockedCount = computed(
     () =>
       this.changes().filter((change) =>
-        validateChange(change, this.changes()).some((issue) => issue.severity === 'blocker'),
+        validateFullReview(change, this.changes()).some((issue) => issue.severity === 'blocker'),
       ).length,
   );
 
-  readonly todayWindowCount = computed(() =>
-    this.filteredChanges().filter((change) => change.window.start.startsWith('2026-09-29')).length,
+  readonly todayWindowCount = computed(
+    () =>
+      this.filteredChanges().filter((change) => change.window.start.startsWith('2026-09-29'))
+        .length,
   );
 
   reload(): void {
@@ -475,7 +481,7 @@ export class DashboardComponent {
 
   issueCount(changeId: string): number {
     const change = this.changes().find((item) => item.id === changeId);
-    return change ? validateChange(change, this.changes()).length : 0;
+    return change ? validateFullReview(change, this.changes()).length : 0;
   }
 
   statusLabel(status: ChangeStatus): string {

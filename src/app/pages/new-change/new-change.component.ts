@@ -12,8 +12,8 @@ import {
   ResourceType,
   StepPhase,
   createEmptyChange,
-  validateChange,
 } from '../../models/change-request.model';
+import { submissionBlockers } from '../../models/review-constraints';
 import { ChangeRequestActions } from '../../store/change-request.actions';
 import { selectAllChanges } from '../../store/change-request.selectors';
 
@@ -104,19 +104,11 @@ import { selectAllChanges } from '../../store/change-request.selectors';
           </clr-input-container>
           <clr-input-container>
             <label>资源名称</label>
-            <input
-              clrInput
-              [ngModel]="resourceName()"
-              (ngModelChange)="resourceName.set($event)"
-            />
+            <input clrInput [ngModel]="resourceName()" (ngModelChange)="resourceName.set($event)" />
           </clr-input-container>
           <clr-select-container>
             <label>类型</label>
-            <select
-              clrSelect
-              [ngModel]="resourceType()"
-              (ngModelChange)="resourceType.set($event)"
-            >
+            <select clrSelect [ngModel]="resourceType()" (ngModelChange)="resourceType.set($event)">
               @for (type of resourceTypes; track type) {
                 <option [value]="type">{{ resourceLabel(type) }}</option>
               }
@@ -142,7 +134,11 @@ import { selectAllChanges } from '../../store/change-request.selectors';
                 <span>{{ resource.id }} · {{ resourceLabel(resource.type) }}</span>
               </div>
               <span>依赖：{{ resource.dependencies.join('、') || '无' }}</span>
-              <button class="btn btn-sm btn-link" type="button" (click)="removeResource(resource.id)">
+              <button
+                class="btn btn-sm btn-link"
+                type="button"
+                (click)="removeResource(resource.id)"
+              >
                 移除
               </button>
             </article>
@@ -157,7 +153,7 @@ import { selectAllChanges } from '../../store/change-request.selectors';
           <span>03</span>
           <div>
             <h2>步骤与回滚</h2>
-            <p>回滚步骤必须包含责任人和可执行命令。</p>
+            <p>回滚步骤必须包含责任人、可执行命令和回滚落点资源 ID。</p>
           </div>
         </div>
         <div class="step-grid">
@@ -182,6 +178,17 @@ import { selectAllChanges } from '../../store/change-request.selectors';
             <label>命令或操作</label>
             <input clrInput [ngModel]="stepCommand()" (ngModelChange)="stepCommand.set($event)" />
           </clr-input-container>
+          @if (stepPhase() === 'rollback') {
+            <clr-input-container>
+              <label>回滚落点资源 ID（逗号分隔）</label>
+              <input
+                clrInput
+                [ngModel]="landingText()"
+                (ngModelChange)="landingText.set($event)"
+                placeholder="例如 rack-a3"
+              />
+            </clr-input-container>
+          }
           <button class="btn" type="button" (click)="addStep()">添加步骤</button>
         </div>
 
@@ -193,6 +200,9 @@ import { selectAllChanges } from '../../store/change-request.selectors';
                 <span>{{ phaseLabel(step.phase) }} · {{ step.owner || '未指定责任人' }}</span>
               </div>
               <code>{{ step.command || '缺少命令' }}</code>
+              @if (step.phase === 'rollback') {
+                <span>落点：{{ step.landingResourceIds?.join('、') || '未指定' }}</span>
+              }
               <button class="btn btn-sm btn-link" type="button" (click)="removeStep(step.id)">
                 移除
               </button>
@@ -207,8 +217,8 @@ import { selectAllChanges } from '../../store/change-request.selectors';
         <div class="section-heading">
           <span>04</span>
           <div>
-            <h2>执行窗口</h2>
-            <p>窗口会用于资源冲突和关键服务观察期检查。</p>
+            <h2>执行窗口与切换目标</h2>
+            <p>窗口参与封网日历核对；切换目标容量不足时提交被挡住。</p>
           </div>
         </div>
         <div class="form-grid window-grid">
@@ -240,6 +250,25 @@ import { selectAllChanges } from '../../store/change-request.selectors';
               (ngModelChange)="updateObservation($event)"
             />
           </clr-input-container>
+          <clr-input-container>
+            <label class="required">切换目标资源 ID</label>
+            <input
+              clrInput
+              [ngModel]="draft().cutover?.targetResourceId"
+              (ngModelChange)="updateCutoverTarget($event)"
+              placeholder="容量承接资源 ID"
+            />
+          </clr-input-container>
+          <clr-input-container>
+            <label class="required">切换所需容量（单元）</label>
+            <input
+              clrNumberInput
+              type="number"
+              min="0"
+              [ngModel]="draft().cutover?.requiredCapacityUnits"
+              (ngModelChange)="updateCutoverRequired($event)"
+            />
+          </clr-input-container>
         </div>
       </section>
 
@@ -247,8 +276,8 @@ import { selectAllChanges } from '../../store/change-request.selectors';
         <div class="section-heading">
           <span>05</span>
           <div>
-            <h2>提交前校验</h2>
-            <p>阻断项未清零时仍可保存草稿，但会阻止进入会签。</p>
+            <h2>提交前审阅单</h2>
+            <p>封网日历、依赖前序、回滚落点和切换容量与窗口重叠同单审阅；阻断项挡住提交。</p>
           </div>
         </div>
         <app-validation-panel [change]="draft()" [allChanges]="allChanges()" />
@@ -442,13 +471,12 @@ export class NewChangeComponent {
   readonly stepPhase = signal<StepPhase>('execute');
   readonly stepOwner = signal('');
   readonly stepCommand = signal('');
+  readonly landingText = signal('');
   readonly resourceTypes: ResourceType[] = ['datacenter', 'rack', 'network', 'storage', 'service'];
 
   readonly blockers = computed(
     () =>
-      validateChange(this.draft(), this.allChanges()).some(
-        (issue) => issue.severity === 'blocker',
-      ) ||
+      submissionBlockers(this.draft(), this.allChanges()).length > 0 ||
       this.draft().resources.length === 0 ||
       this.draft().steps.length === 0,
   );
@@ -461,10 +489,7 @@ export class NewChangeComponent {
     this.draft.update((draft) => ({ ...draft, [key]: value }));
   }
 
-  updateWindow(
-    key: 'start' | 'end',
-    value: string,
-  ): void {
+  updateWindow(key: 'start' | 'end', value: string): void {
     this.draft.update((draft) => ({
       ...draft,
       window: { ...draft.window, [key]: value },
@@ -475,6 +500,26 @@ export class NewChangeComponent {
     this.draft.update((draft) => ({
       ...draft,
       window: { ...draft.window, observationWindowMinutes: Number(value) || 0 },
+    }));
+  }
+
+  updateCutoverTarget(value: string): void {
+    this.draft.update((draft) => ({
+      ...draft,
+      cutover: {
+        targetResourceId: value.trim(),
+        requiredCapacityUnits: draft.cutover?.requiredCapacityUnits ?? 0,
+      },
+    }));
+  }
+
+  updateCutoverRequired(value: string | number): void {
+    this.draft.update((draft) => ({
+      ...draft,
+      cutover: {
+        targetResourceId: draft.cutover?.targetResourceId ?? '',
+        requiredCapacityUnits: Number(value) || 0,
+      },
     }));
   }
 
@@ -527,6 +572,7 @@ export class NewChangeComponent {
     if (!title) {
       return;
     }
+    const isRollback = this.stepPhase() === 'rollback';
     const step: ChangeStep = {
       id: `step-${Date.now()}`,
       phase: this.stepPhase(),
@@ -535,11 +581,18 @@ export class NewChangeComponent {
       durationMinutes: 15,
       command: this.stepCommand().trim(),
       completed: false,
+      landingResourceIds: isRollback
+        ? this.landingText()
+            .split(/[、,，]/)
+            .map((item) => item.trim())
+            .filter(Boolean)
+        : undefined,
     };
     this.draft.update((draft) => ({ ...draft, steps: [...draft.steps, step] }));
     this.stepTitle.set('');
     this.stepOwner.set('');
     this.stepCommand.set('');
+    this.landingText.set('');
   }
 
   removeStep(id: string): void {

@@ -1,9 +1,6 @@
 import { ChangeDetectionStrategy, Component, computed, input } from '@angular/core';
-import {
-  ChangeRequest,
-  ValidationIssue,
-  validateChange,
-} from '../../models/change-request.model';
+import { ChangeRequest, ValidationIssue } from '../../models/change-request.model';
+import { validateFullReview } from '../../models/review-constraints';
 
 @Component({
   selector: 'app-validation-panel',
@@ -14,9 +11,9 @@ import {
         <strong>{{ issues().length ? '存在待处理项' : '校验通过' }}</strong>
         <span>
           @if (issues().length) {
-            {{ blockers() }} 个阻断项，{{ warnings() }} 个警告
+            {{ blockers() }} 个阻断项，{{ warnings() }} 个警告，{{ infos() }} 个提示
           } @else {
-            可提交审批
+            三类约束齐备，可提交审批
           }
         </span>
       </div>
@@ -24,9 +21,13 @@ import {
     </div>
 
     @for (issue of issues(); track issue.id) {
-      <article class="issue" [class.warning]="issue.severity === 'warning'">
+      <article
+        class="issue"
+        [class.warning]="issue.severity === 'warning'"
+        [class.info]="issue.severity === 'info'"
+      >
         <div class="issue-title">
-          <span class="severity">{{ issue.severity === 'blocker' ? '阻断' : '警告' }}</span>
+          <span class="severity">{{ severityLabel(issue.severity) }}</span>
           <strong>{{ issue.title }}</strong>
         </div>
         <p>{{ issue.detail }}</p>
@@ -83,6 +84,10 @@ import {
         border-left: 3px solid #d99000;
       }
 
+      .issue.info {
+        border-left: 3px solid #266c91;
+      }
+
       .issue-title {
         display: flex;
         align-items: center;
@@ -98,6 +103,10 @@ import {
 
       .warning .severity {
         background: #a96800;
+      }
+
+      .info .severity {
+        background: #266c91;
       }
 
       p {
@@ -117,11 +126,18 @@ export class ValidationPanelComponent {
   readonly change = input.required<ChangeRequest>();
   readonly allChanges = input.required<ChangeRequest[]>();
 
-  readonly issues = computed(() => validateChange(this.change(), this.allChanges()));
+  readonly issues = computed(() => validateFullReview(this.change(), this.allChanges()));
   readonly blockers = computed(
     () => this.issues().filter((issue) => issue.severity === 'blocker').length,
   );
   readonly warnings = computed(
     () => this.issues().filter((issue) => issue.severity === 'warning').length,
   );
+  readonly infos = computed(
+    () => this.issues().filter((issue) => issue.severity === 'info').length,
+  );
+
+  severityLabel(severity: ValidationIssue['severity']): string {
+    return { blocker: '阻断', warning: '警告', info: '提示' }[severity];
+  }
 }

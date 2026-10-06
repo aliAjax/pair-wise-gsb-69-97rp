@@ -33,6 +33,13 @@ export class ChangeRequestService {
   }
 
   exportRetrospective(change: ChangeRequest): string {
+    const rollbackLandings = Array.from(
+      new Set(
+        change.steps
+          .filter((step) => step.phase === 'rollback')
+          .flatMap((step) => step.landingResourceIds ?? []),
+      ),
+    );
     const lines = [
       `# ${change.id} ${change.title} 复盘记录`,
       '',
@@ -40,12 +47,14 @@ export class ChangeRequestService {
       `负责人：${change.owner}`,
       `窗口：${change.window.start} - ${change.window.end}`,
       `风险等级：${change.risk}`,
+      `审阅约束版本：${change.constraintVersion ?? '旧记录·待补'}`,
+      `切换目标：${change.cutover?.targetResourceId || '未登记'}（需 ${change.cutover?.requiredCapacityUnits ?? 0} 容量单元）`,
+      `回滚落点：${rollbackLandings.join('、') || '未登记'}`,
       '',
       '## 执行偏离',
       ...(change.deviations.length
         ? change.deviations.map(
-            (item) =>
-              `- ${item.recordedAt} ${item.owner} [${item.decision}] ${item.description}`,
+            (item) => `- ${item.recordedAt} ${item.owner} [${item.decision}] ${item.description}`,
           )
         : ['- 无']),
       '',

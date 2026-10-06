@@ -2,6 +2,7 @@ export type ChangeStatus =
   | 'draft'
   | 'submitted'
   | 'approved'
+  | 'standby'
   | 'executing'
   | 'completed'
   | 'rolled_back'
@@ -20,6 +21,16 @@ export interface ChangeResource {
   type: ResourceType;
   critical: boolean;
   dependencies: string[];
+  /** 资源总容量单元（切换目标容量核算用），缺省表示未登记。 */
+  capacityUnits?: number;
+  /** 已被在途/已批准变更承诺占用的容量单元。 */
+  committedCapacityUnits?: number;
+}
+
+/** 切换目标与所需容量，参与审阅单容量门禁。 */
+export interface CutoverPlan {
+  targetResourceId: string;
+  requiredCapacityUnits: number;
 }
 
 export interface ChangeStep {
@@ -31,6 +42,8 @@ export interface ChangeStep {
   command: string;
   completed: boolean;
   completedAt?: string;
+  /** 回滚落点资源 ID，回滚步骤必填；命中封网资源时提交被挡住。 */
+  landingResourceIds?: string[];
 }
 
 export interface ChangeWindow {
@@ -75,6 +88,12 @@ export interface ChangeRequest {
   resources: ChangeResource[];
   steps: ChangeStep[];
   window: ChangeWindow;
+  /** 切换目标与所需容量，容量不足时提交被挡住。 */
+  cutover?: CutoverPlan;
+  /** 审阅约束版本，缺省表示旧记录，需要待补。 */
+  constraintVersion?: string;
+  /** 批准时窗口与依赖的指纹，用于发现批准后的变化。 */
+  reviewSnapshot?: string;
   approvals: ApprovalRecord[];
   deviations: DeviationRecord[];
   audit: AuditRecord[];
@@ -91,7 +110,12 @@ export interface ValidationIssue {
     | 'WINDOW_CONFLICT'
     | 'ROLLBACK_UNEXECUTABLE'
     | 'OBSERVATION_TOO_SHORT'
-    | 'OWNER_MISSING';
+    | 'OWNER_MISSING'
+    | 'BLACKOUT_CALENDAR_CONFLICT'
+    | 'ROLLBACK_LANDING_BLACKOUT'
+    | 'CUTOVER_CAPACITY_INSUFFICIENT'
+    | 'PREDECESSOR_NOT_READY'
+    | 'CONSTRAINT_PENDING_SUPPLEMENT';
   title: string;
   detail: string;
   suggestedAction: string;
@@ -100,10 +124,14 @@ export interface ValidationIssue {
 
 export const APPROVAL_ORDER: ApprovalStage[] = ['network', 'system', 'security', 'business'];
 
+/** 审阅单当前采用的约束版本。旧记录缺少该版本时必须“待补”，不能直接放行。 */
+export const REVIEW_CONSTRAINT_VERSION = 'review-v2';
+
 export const STATUS_LABELS: Record<ChangeStatus, string> = {
   draft: '草稿',
   submitted: '待会签',
   approved: '已批准',
+  standby: '待命中',
   executing: '执行中',
   completed: '已完成',
   rolled_back: '已回滚',
@@ -164,6 +192,8 @@ export function createEmptyChange(): ChangeRequest {
       observationWindowMinutes: 30,
       blackoutProtected: false,
     },
+    cutover: { targetResourceId: '', requiredCapacityUnits: 0 },
+    constraintVersion: REVIEW_CONSTRAINT_VERSION,
     approvals: createEmptyApprovals(),
     deviations: [],
     audit: [],
@@ -185,9 +215,49 @@ export function isWindowOverlapping(left: ChangeWindow, right: ChangeWindow): bo
   return leftStart < rightEnd && rightStart < leftEnd;
 }
 
-export function validateChange(change: ChangeRequest, allChanges: ChangeRequest[]): ValidationIssue[] {
+/** 与其他有效变更是否存在“非依赖串联”的共享资源窗口冲突。 */
+export function hasWindowConflict(
+  change: ChangeRequest,
+  allChanges: ChangeRequest[],
+): ChangeRequest | null {
+  const ownResourceIds = new Set(change.resources.map((resource) => resource.id));
+  const referencedDependencyIds = new Set(
+    change.resources.flatMap((resource) => resource.dependencies),
+  );
+
+  for (const candidate of allChanges) {
+    if (
+      candidate.id === change.id ||
+      ['draft', 'rejected', 'rolled_back'].includes(candidate.status) ||
+      !isWindowOverlapping(change.window, candidate.window)
+    ) {
+      continue;
+    }
+    const shared = candidate.resources.some(
+      (candidateResource) =>
+        ownResourceIds.has(candidateResource.id) &&
+        // 依赖前序独占资源的窗口交叠由依赖顺序承接，不算冲突。
+        !(
+          !change.resources.some((resource) => resource.id === candidateResource.id) &&
+          referencedDependencyIds.has(candidateResource.id)
+        ),
+    );
+    if (shared) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export function validateChange(
+  change: ChangeRequest,
+  allChanges: ChangeRequest[],
+): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const resourceMap = new Map(change.resources.map((resource) => [resource.id, resource]));
+  const referencedDependencyIds = new Set(
+    change.resources.flatMap((resource) => resource.dependencies),
+  );
 
   change.resources.forEach((resource) => {
     resource.dependencies
@@ -217,7 +287,14 @@ export function validateChange(change: ChangeRequest, allChanges: ChangeRequest[
       const shared = change.resources.filter((resource) =>
         candidate.resources.some((candidateResource) => candidateResource.id === resource.id),
       );
-      if (shared.length > 0) {
+      // 共享机柜变更按依赖排列：本变更显式依赖前序变更独占的资源时，
+      // 窗口交叠由依赖顺序串行承接，不再重复判为窗口冲突。
+      const linkedByPredecessor = candidate.resources.some(
+        (candidateResource) =>
+          !resourceMap.has(candidateResource.id) &&
+          referencedDependencyIds.has(candidateResource.id),
+      );
+      if (shared.length > 0 && !linkedByPredecessor) {
         issues.push({
           id: `${change.id}-conflict-${candidate.id}`,
           changeId: change.id,
@@ -278,11 +355,7 @@ export function validateChange(change: ChangeRequest, allChanges: ChangeRequest[
   return issues;
 }
 
-export function createAudit(
-  action: string,
-  detail: string,
-  actor = '当前用户',
-): AuditRecord {
+export function createAudit(action: string, detail: string, actor = '当前用户'): AuditRecord {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     timestamp: new Date().toISOString(),

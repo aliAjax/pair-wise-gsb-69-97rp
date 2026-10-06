@@ -15,7 +15,7 @@ import {
   validateChange,
 } from '../../models/change-request.model';
 import { ChangeRequestActions } from '../../store/change-request.actions';
-import { selectAllChanges } from '../../store/change-request.selectors';
+import { selectAllChanges, selectBlackouts } from '../../store/change-request.selectors';
 
 @Component({
   selector: 'app-new-change',
@@ -104,19 +104,11 @@ import { selectAllChanges } from '../../store/change-request.selectors';
           </clr-input-container>
           <clr-input-container>
             <label>资源名称</label>
-            <input
-              clrInput
-              [ngModel]="resourceName()"
-              (ngModelChange)="resourceName.set($event)"
-            />
+            <input clrInput [ngModel]="resourceName()" (ngModelChange)="resourceName.set($event)" />
           </clr-input-container>
           <clr-select-container>
             <label>类型</label>
-            <select
-              clrSelect
-              [ngModel]="resourceType()"
-              (ngModelChange)="resourceType.set($event)"
-            >
+            <select clrSelect [ngModel]="resourceType()" (ngModelChange)="resourceType.set($event)">
               @for (type of resourceTypes; track type) {
                 <option [value]="type">{{ resourceLabel(type) }}</option>
               }
@@ -142,7 +134,11 @@ import { selectAllChanges } from '../../store/change-request.selectors';
                 <span>{{ resource.id }} · {{ resourceLabel(resource.type) }}</span>
               </div>
               <span>依赖：{{ resource.dependencies.join('、') || '无' }}</span>
-              <button class="btn btn-sm btn-link" type="button" (click)="removeResource(resource.id)">
+              <button
+                class="btn btn-sm btn-link"
+                type="button"
+                (click)="removeResource(resource.id)"
+              >
                 移除
               </button>
             </article>
@@ -251,7 +247,11 @@ import { selectAllChanges } from '../../store/change-request.selectors';
             <p>阻断项未清零时仍可保存草稿，但会阻止进入会签。</p>
           </div>
         </div>
-        <app-validation-panel [change]="draft()" [allChanges]="allChanges()" />
+        <app-validation-panel
+          [change]="draft()"
+          [allChanges]="allChanges()"
+          [blackouts]="blackouts()"
+        />
       </section>
     </div>
 
@@ -433,6 +433,7 @@ export class NewChangeComponent {
   private readonly router = inject(Router);
 
   readonly allChanges = this.store.selectSignal(selectAllChanges);
+  readonly blackouts = this.store.selectSignal(selectBlackouts);
   readonly draft = signal<ChangeRequest>(createEmptyChange());
   readonly resourceId = signal('');
   readonly resourceName = signal('');
@@ -446,7 +447,7 @@ export class NewChangeComponent {
 
   readonly blockers = computed(
     () =>
-      validateChange(this.draft(), this.allChanges()).some(
+      validateChange(this.draft(), this.allChanges(), { blackouts: this.blackouts() }).some(
         (issue) => issue.severity === 'blocker',
       ) ||
       this.draft().resources.length === 0 ||
@@ -461,10 +462,7 @@ export class NewChangeComponent {
     this.draft.update((draft) => ({ ...draft, [key]: value }));
   }
 
-  updateWindow(
-    key: 'start' | 'end',
-    value: string,
-  ): void {
+  updateWindow(key: 'start' | 'end', value: string): void {
     this.draft.update((draft) => ({
       ...draft,
       window: { ...draft.window, [key]: value },

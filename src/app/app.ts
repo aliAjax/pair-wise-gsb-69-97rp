@@ -17,5 +17,6 @@ export class App {
 
   constructor() {
     this.store.dispatch(ChangeRequestActions.loadChanges());
+    this.store.dispatch(ChangeRequestActions.loadBlackouts());
   }
 }

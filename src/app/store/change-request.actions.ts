@@ -1,9 +1,6 @@
 import { createActionGroup, emptyProps, props } from '@ngrx/store';
-import {
-  ApprovalStage,
-  ChangeRequest,
-  DeviationRecord,
-} from '../models/change-request.model';
+import { ApprovalStage, ChangeRequest, DeviationRecord } from '../models/change-request.model';
+import { BlackoutPeriod } from '../models/blackout.model';
 
 export const ChangeRequestActions = createActionGroup({
   source: 'Change Request',
@@ -11,15 +8,34 @@ export const ChangeRequestActions = createActionGroup({
     'Load Changes': emptyProps(),
     'Load Changes Success': props<{ changes: ChangeRequest[] }>(),
     'Load Changes Failure': props<{ error: string }>(),
+    'Load Blackouts': emptyProps(),
+    'Load Blackouts Success': props<{ blackouts: BlackoutPeriod[] }>(),
+    'Load Blackouts Failure': props<{ error: string }>(),
     'Create Change': props<{ change: ChangeRequest }>(),
     'Update Change': props<{ change: ChangeRequest }>(),
     'Delete Draft': props<{ id: string }>(),
     'Submit For Review': props<{ id: string }>(),
-    'Approve Stage': props<{ id: string; stage: ApprovalStage; approver: string; comment: string }>(),
-    'Reject Stage': props<{ id: string; stage: ApprovalStage; approver: string; comment: string }>(),
+    'Approve Stage': props<{
+      id: string;
+      stage: ApprovalStage;
+      approver: string;
+      comment: string;
+    }>(),
+    'Reject Stage': props<{
+      id: string;
+      stage: ApprovalStage;
+      approver: string;
+      comment: string;
+    }>(),
     'Start Execution': props<{ id: string }>(),
+    'Promote From Standby': props<{ id: string }>(),
+    'Supplement Constraints': props<{ id: string }>(),
     'Toggle Step': props<{ id: string; stepId: string }>(),
     'Record Deviation': props<{ id: string; deviation: DeviationRecord }>(),
-    'Complete Execution': props<{ id: string; result: 'completed' | 'rolled_back'; note: string }>(),
+    'Complete Execution': props<{
+      id: string;
+      result: 'completed' | 'rolled_back';
+      note: string;
+    }>(),
   },
 });

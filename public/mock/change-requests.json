@@ -55,7 +55,14 @@
         "owner": "周启明",
         "durationMinutes": 15,
         "command": "switchover --plane B --confirm",
-        "completed": false
+        "completed": false,
+        "targetCapacity": {
+          "resourceId": "sw-core-b",
+          "resourceName": "核心交换机 B（B 平面）",
+          "availableUnits": 40,
+          "requiredUnits": 60,
+          "unitLabel": "Gbps 可承载带宽"
+        }
       },
       {
         "id": "step-3",
@@ -73,7 +80,13 @@
         "owner": "",
         "durationMinutes": 35,
         "command": "",
-        "completed": false
+        "completed": false,
+        "rollbackLanding": {
+          "resourceId": "rack-a3",
+          "resourceName": "A3 机柜（A 平面原落点）",
+          "availableCapacityUnits": 0,
+          "note": "回退时需落回 A3 机柜上联，但该资源在封网范围内。"
+        }
       }
     ],
     "window": {
@@ -104,6 +117,7 @@
       }
     ],
     "deviations": [],
+    "constraintCompleteness": "incomplete",
     "audit": [
       {
         "id": "audit-1",
@@ -238,6 +252,7 @@
         "decision": "pause"
       }
     ],
+    "constraintCompleteness": "incomplete",
     "audit": [
       {
         "id": "audit-1",
@@ -335,6 +350,7 @@
       }
     ],
     "deviations": [],
+    "constraintCompleteness": "incomplete",
     "audit": [
       {
         "id": "audit-1",
@@ -422,6 +438,7 @@
       }
     ],
     "deviations": [],
+    "constraintCompleteness": "incomplete",
     "audit": [
       {
         "id": "audit-1",
@@ -433,5 +450,128 @@
     ],
     "createdAt": "2026-09-25T08:00:00.000Z",
     "updatedAt": "2026-09-27T03:05:00.000Z"
+  },
+  {
+    "id": "CHG-24035",
+    "title": "B2 机柜结算存储接入交换机割接",
+    "summary": "结算存储扩容完成后，割接 B2 机柜接入交换机至新汇聚，与扩容串行执行。",
+    "owner": "孟京",
+    "onCall": ["孟京", "高巍"],
+    "status": "approved",
+    "risk": "high",
+    "resources": [
+      {
+        "id": "rack-b2",
+        "name": "B2 机柜",
+        "type": "rack",
+        "critical": false,
+        "dependencies": ["dc-east-2"]
+      },
+      {
+        "id": "sw-access-b2",
+        "name": "B2 接入交换机",
+        "type": "network",
+        "critical": true,
+        "dependencies": ["rack-b2", "storage-prod"]
+      }
+    ],
+    "steps": [
+      {
+        "id": "step-1",
+        "phase": "prepare",
+        "title": "核对扩容进度与新汇聚链路",
+        "owner": "高巍",
+        "durationMinutes": 20,
+        "command": "show uplink protocol map",
+        "completed": false
+      },
+      {
+        "id": "step-2",
+        "phase": "execute",
+        "title": "割接 B2 接入交换机至新汇聚",
+        "owner": "孟京",
+        "durationMinutes": 25,
+        "command": "fabric migrate --rack b2 --to agg-new",
+        "completed": false,
+        "targetCapacity": {
+          "resourceId": "agg-new",
+          "resourceName": "新汇聚交换机",
+          "availableUnits": 200,
+          "requiredUnits": 40,
+          "unitLabel": "Gbps 可承载带宽"
+        }
+      },
+      {
+        "id": "step-r1",
+        "phase": "rollback",
+        "title": "切回旧汇聚",
+        "owner": "孟京",
+        "durationMinutes": 20,
+        "command": "fabric rollback --rack b2",
+        "completed": false,
+        "rollbackLanding": {
+          "resourceId": "agg-old",
+          "resourceName": "旧汇聚交换机",
+          "availableCapacityUnits": 120,
+          "note": "旧汇聚保留 2 小时回退容量。"
+        }
+      }
+    ],
+    "window": {
+      "start": "2026-09-29T04:00",
+      "end": "2026-09-29T06:00",
+      "observationWindowMinutes": 30,
+      "blackoutProtected": false
+    },
+    "approvals": [
+      {
+        "stage": "network",
+        "state": "approved",
+        "approver": "陆成",
+        "comment": "与扩容串行，前序完成后启动。",
+        "decidedAt": "2026-09-28T09:20:00.000Z"
+      },
+      {
+        "stage": "system",
+        "state": "approved",
+        "approver": "宋海",
+        "comment": "汇聚容量充足，回退路径可用。",
+        "decidedAt": "2026-09-28T09:48:00.000Z"
+      },
+      {
+        "stage": "security",
+        "state": "approved",
+        "approver": "王珊",
+        "comment": "控制面变更不涉及数据落地。",
+        "decidedAt": "2026-09-28T10:05:00.000Z"
+      },
+      {
+        "stage": "business",
+        "state": "approved",
+        "approver": "韩璐",
+        "comment": "扩容窗口内串行执行，不增加额外停机。",
+        "decidedAt": "2026-09-28T10:22:00.000Z"
+      }
+    ],
+    "deviations": [],
+    "constraintCompleteness": "complete",
+    "constraintSnapshot": {
+      "windowStart": "2026-09-29T04:00",
+      "windowEnd": "2026-09-29T06:00",
+      "prerequisiteIds": ["CHG-24028"],
+      "blackoutKey": "BO-2026-CORE-A-STANDBY|2026-09-30T00:00|2026-10-01T00:00|rack-a3,sw-core-a;BO-2026-NATIONAL-DAY|2026-10-01T00:00|2026-10-08T00:00|;BO-2026-PAYMENT-FREEZE|2026-09-29T20:00|2026-10-01T08:00|rack-c1,svc-risk",
+      "approvedAt": "2026-09-28T10:22:00.000Z"
+    },
+    "audit": [
+      {
+        "id": "audit-1",
+        "timestamp": "2026-09-28T10:22:00.000Z",
+        "actor": "韩璐",
+        "action": "阶段会签",
+        "detail": "业务负责人批准，会签全部完成。"
+      }
+    ],
+    "createdAt": "2026-09-27T13:40:00.000Z",
+    "updatedAt": "2026-09-28T10:22:00.000Z"
   }
 ]

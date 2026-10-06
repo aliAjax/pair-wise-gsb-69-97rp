@@ -1,15 +1,14 @@
 import { DatePipe, NgClass } from '@angular/common';
-import {
-  ChangeDetectionStrategy,
-  Component,
-  computed,
-  inject,
-  signal,
-} from '@angular/core';
+import { ChangeDetectionStrategy, Component, computed, inject, signal } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { ClarityModule } from '@clr/angular';
 import { Store } from '@ngrx/store';
+import {
+  blackoutCoversAnyResource,
+  isResourceInBlackoutScope,
+  isWindowInBlackout,
+} from '../../models/blackout.model';
 import { AuditTrailComponent } from '../../components/audit-trail/audit-trail.component';
 import { DependencyGraphComponent } from '../../components/dependency-graph/dependency-graph.component';
 import { ValidationPanelComponent } from '../../components/validation-panel/validation-panel.component';
@@ -18,17 +17,21 @@ import {
   ApprovalStage,
   ChangeRequest,
   ChangeStep,
+  ConstraintDrift,
   DeviationRecord,
   PHASE_LABELS,
   RESOURCE_LABELS,
   RISK_LABELS,
   STAGE_LABELS,
   STATUS_LABELS,
+  detectConstraintDrift,
+  prerequisiteChanges,
+  unfinishedPrerequisites,
   validateChange,
 } from '../../models/change-request.model';
 import { ChangeRequestService } from '../../services/change-request.service';
 import { ChangeRequestActions } from '../../store/change-request.actions';
-import { selectAllChanges } from '../../store/change-request.selectors';
+import { selectAllChanges, selectBlackouts } from '../../store/change-request.selectors';
 
 type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval' | 'audit';
 
@@ -75,6 +78,51 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
           </div>
         </div>
       </section>
+
+      @if (item.status === 'standby') {
+        <div class="notice-banner standby-banner">
+          <strong>变更待命中</strong>
+          <span>
+            前序
+            {{
+              waitingPrerequisites()
+                .map((c) => c.id)
+                .join('、') || '—'
+            }}
+            尚未完成，共享机柜变更按依赖顺序执行，前序完成后自动解除待命。
+          </span>
+        </div>
+      }
+
+      @if (item.status === 'submitted' && drifts().length) {
+        <div class="notice-banner invalid-banner">
+          <strong>会签已作废，需重新送审</strong>
+          <span>
+            批准后窗口或前序依赖发生变化，未执行的会签已作废：
+            @for (drift of drifts(); track drift.kind) {
+              {{ drift.detail }}
+            }
+          </span>
+        </div>
+      }
+
+      @if (item.constraintCompleteness === 'incomplete') {
+        <div class="notice-banner incomplete-banner">
+          <div>
+            <strong>审阅约束数据待补</strong>
+            <span>该旧记录缺少封网日历、前序依赖或回滚落点/切换容量数据，按要求不能直接放行。</span>
+          </div>
+          @if (
+            item.status !== 'executing' &&
+            item.status !== 'completed' &&
+            item.status !== 'rolled_back'
+          ) {
+            <button class="btn btn-sm" type="button" (click)="supplementConstraints()">
+              标记约束已补齐
+            </button>
+          }
+        </div>
+      }
 
       <nav class="tab-nav" aria-label="变更详情">
         @for (tab of tabs; track tab.id) {
@@ -159,7 +207,9 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                     </clr-input-container>
                   </div>
                   <div class="edit-actions">
-                    <button class="btn btn-primary" type="button" (click)="saveEdit()">保存方案</button>
+                    <button class="btn btn-primary" type="button" (click)="saveEdit()">
+                      保存方案
+                    </button>
                   </div>
                 </div>
               } @else {
@@ -181,13 +231,100 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   </div>
                   <div>
                     <dt>当前门禁</dt>
-                    <dd>{{ pendingStage() ? stageLabel(pendingStage()!) + '待会签' : approvalGate() }}</dd>
+                    <dd>
+                      {{ pendingStage() ? stageLabel(pendingStage()!) + '待会签' : approvalGate() }}
+                    </dd>
                   </div>
                 </dl>
               }
             </section>
 
-            <app-validation-panel [change]="item" [allChanges]="changes()" />
+            <app-validation-panel
+              [change]="item"
+              [allChanges]="changes()"
+              [blackouts]="blackouts()"
+            />
+
+            <section class="surface span-2">
+              <div class="surface-heading">
+                <div>
+                  <h2>统一审阅单约束</h2>
+                  <span>封网日历、前序依赖、回滚落点与切换目标容量在同一单审阅</span>
+                </div>
+              </div>
+              <div class="constraint-grid">
+                <article class="constraint-card">
+                  <h3>封网日历</h3>
+                  @if (hittingBlackouts().length) {
+                    @for (hit of hittingBlackouts(); track hit.id) {
+                      <p class="bad">{{ hit.name }}（{{ hit.start | date: 'MM-dd HH:mm' }} 起）</p>
+                    }
+                  } @else {
+                    <p class="good">窗口不在封网时段内</p>
+                  }
+                  <small>
+                    @for (period of blackouts(); track period.id) {
+                      {{ period.name }}；
+                    } @empty {
+                      未加载封网日历
+                    }
+                  </small>
+                </article>
+
+                <article class="constraint-card">
+                  <h3>前序依赖（共享机柜按序排列）</h3>
+                  @if (prerequisites().length) {
+                    <ol class="prereq-list">
+                      @for (pre of prerequisites(); track pre.id) {
+                        <li [class.done]="pre.status === 'completed'">
+                          {{ pre.id }} · {{ pre.title }}
+                          <span>{{ statusLabel(pre.status) }}</span>
+                        </li>
+                      }
+                    </ol>
+                  } @else {
+                    <p class="good">没有需要等待的前序变更</p>
+                  }
+                </article>
+
+                <article class="constraint-card">
+                  <h3>回滚落点</h3>
+                  @for (step of rollbackLandings(); track step.id) {
+                    <p>
+                      {{ step.title }} →
+                      {{
+                        step.rollbackLanding?.resourceName ??
+                          step.rollbackLanding?.resourceId ??
+                          '未指定落点'
+                      }}
+                      @if (landingIssue(step.rollbackLanding?.resourceId)) {
+                        <span class="bad">落点封网</span>
+                      }
+                    </p>
+                  } @empty {
+                    <p class="good">无需回滚落点（或未配置回滚步骤）</p>
+                  }
+                </article>
+
+                <article class="constraint-card">
+                  <h3>切换目标容量</h3>
+                  @for (step of switchTargets(); track step.id) {
+                    <p
+                      [class.good-text]="isTargetSufficient(step)"
+                      [class.bad]="!isTargetSufficient(step)"
+                    >
+                      {{ step.targetCapacity?.resourceName ?? step.targetCapacity?.resourceId }}：
+                      {{ step.targetCapacity?.availableUnits }} /
+                      {{ step.targetCapacity?.requiredUnits }}
+                      {{ step.targetCapacity?.unitLabel }}
+                      {{ isTargetSufficient(step) ? '充足' : '不足' }}
+                    </p>
+                  } @empty {
+                    <p class="good">本变更无容量切换目标</p>
+                  }
+                </article>
+              </div>
+            </section>
 
             <section class="surface span-2">
               <div class="surface-heading">
@@ -231,14 +368,18 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
           <section class="surface">
             <div class="surface-heading">
               <div>
-                <h2>窗口与资源冲突</h2>
-                <span>按 09-29 至 10-02 展示所有有效窗口</span>
+                <h2>窗口、封网与资源冲突</h2>
+                <span>按 09-29 至 10-02 展示所有有效窗口，斜纹区为封网时段</span>
               </div>
             </div>
-            <app-window-gantt [changes]="changes()" [selectedId]="item.id" />
+            <app-window-gantt
+              [changes]="changes()"
+              [selectedId]="item.id"
+              [blackouts]="blackouts()"
+            />
             <div class="conflict-notes">
               @for (issue of issues(); track issue.id) {
-                @if (issue.code === 'WINDOW_CONFLICT') {
+                @if (issue.code === 'WINDOW_CONFLICT' || issue.code === 'BLACKOUT_WINDOW') {
                   <article>
                     <strong>{{ issue.title }}</strong>
                     <p>{{ issue.detail }}</p>
@@ -246,7 +387,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   </article>
                 }
               } @empty {
-                <p class="empty">当前没有窗口冲突。</p>
+                <p class="empty">当前没有窗口冲突或封网命中。</p>
               }
             </div>
           </section>
@@ -262,10 +403,34 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                 </div>
                 @if (item.status === 'approved') {
                   <button class="btn btn-primary" type="button" (click)="startExecution()">
-                    开始执行
+                    {{
+                      waitingPrerequisites().length ? '排队启动（前序未完成将待命）' : '开始执行'
+                    }}
+                  </button>
+                }
+                @if (item.status === 'standby') {
+                  <button
+                    class="btn"
+                    type="button"
+                    (click)="promoteFromStandby()"
+                    [disabled]="waitingPrerequisites().length > 0"
+                  >
+                    解除待命并执行
                   </button>
                 }
               </div>
+              @if (item.status === 'standby') {
+                <div class="standby-note">
+                  <strong>停在待命：</strong>
+                  等待前序
+                  {{
+                    waitingPrerequisites()
+                      .map((pre) => pre.id)
+                      .join('、')
+                  }}
+                  完成，前序完成后自动解除。
+                </div>
+              }
               <div class="step-list">
                 @for (step of stepsBy(item); track step.id) {
                   <label class="step-row" [class.completed]="step.completed">
@@ -294,11 +459,24 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   <h2>实时执行记录</h2>
                   <span>记录偏离并明确继续、暂停或回滚</span>
                 </div>
-                <a class="btn btn-sm" href="https://logs.example.internal/change/{{ item.id }}" target="_blank" rel="noopener">
+                <a
+                  class="btn btn-sm"
+                  href="https://logs.example.internal/change/{{ item.id }}"
+                  target="_blank"
+                  rel="noopener"
+                >
                   打开实时日志
                 </a>
               </div>
               @if (item.status === 'executing') {
+                @if (drifts().length) {
+                  <div class="standby-note impact-note">
+                    <strong>批准后约束变化（执行中仅记录影响）：</strong>
+                    @for (drift of drifts(); track drift.kind) {
+                      <span>{{ drift.detail }}</span>
+                    }
+                  </div>
+                }
                 <div class="deviation-form">
                   <clr-textarea-container>
                     <label>偏离说明</label>
@@ -327,7 +505,9 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   </div>
                 </div>
                 <div class="completion-actions">
-                  <button class="btn" type="button" (click)="complete('rolled_back')">判定回滚</button>
+                  <button class="btn" type="button" (click)="complete('rolled_back')">
+                    判定回滚
+                  </button>
                   <button class="btn btn-primary" type="button" (click)="complete('completed')">
                     执行完成
                   </button>
@@ -357,7 +537,7 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               <div class="surface-heading">
                 <div>
                   <h2>顺序会签</h2>
-                  <span>必须按网络、系统、安全、业务顺序完成</span>
+                  <span>封网、前序、回滚落点与容量全通过后，按网络、系统、安全、业务顺序完成</span>
                 </div>
                 @if (item.status === 'draft' || item.status === 'rejected') {
                   <button
@@ -370,6 +550,24 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                   </button>
                 }
               </div>
+              @if ((item.status === 'draft' || item.status === 'rejected') && hasBlockers()) {
+                <div class="blocker-hint">
+                  存在 {{ blockers().length }} 个阻断项，提交已被挡住并保留现状：
+                  @for (issue of blockers(); track issue.id) {
+                    <span>{{ issue.title }}；</span>
+                  }
+                </div>
+              }
+              @if (prerequisites().length) {
+                <div class="prereq-hint">
+                  前序顺序：
+                  @for (pre of prerequisites(); track pre.id) {
+                    <span [class.done]="pre.status === 'completed'">
+                      {{ $index + 1 }}. {{ pre.id }}（{{ statusLabel(pre.status) }}）
+                    </span>
+                  }
+                </div>
+              }
               <ol class="approval-flow">
                 @for (approval of item.approvals; track approval.stage) {
                   <li [ngClass]="approval.state">
@@ -399,6 +597,14 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
               </div>
               @if (pendingStage(); as stage) {
                 @if (item.status === 'submitted' || item.status === 'rejected') {
+                  @if (hasBlockers()) {
+                    <div class="blocker-hint">
+                      审阅单存在 {{ blockers().length }} 个阻断项，会签被挡住：
+                      @for (issue of blockers(); track issue.id) {
+                        <span>{{ issue.title }}；</span>
+                      }
+                    </div>
+                  }
                   <div class="approval-form">
                     <clr-input-container>
                       <label>审批人</label>
@@ -419,18 +625,33 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
                     </clr-textarea-container>
                     <div class="approval-actions">
                       <button class="btn" type="button" (click)="reject(stage)">退回</button>
-                      <button class="btn btn-primary" type="button" (click)="approve(stage)">
+                      <button
+                        class="btn btn-primary"
+                        type="button"
+                        (click)="approve(stage)"
+                        [disabled]="hasBlockers()"
+                      >
                         批准 {{ stageLabel(stage) }}
                       </button>
                     </div>
                   </div>
                 } @else {
-                  <p class="empty">当前状态不允许审批操作。</p>
+                  @if (item.status === 'standby') {
+                    <p class="standby-message">
+                      已批准但前序未完成，变更停在待命，审批记录保持有效。
+                    </p>
+                  } @else if (
+                    item.status === 'executing' ||
+                    item.status === 'completed' ||
+                    item.status === 'rolled_back'
+                  ) {
+                    <p class="empty">执行中或已完结，会签记录已冻结。</p>
+                  } @else {
+                    <p class="empty">当前状态不允许审批操作。</p>
+                  }
                 }
               } @else {
-                <p class="approved-message">
-                  会签已完成。开始执行后审批记录自动冻结，不允许修改。
-                </p>
+                <p class="approved-message">会签已完成。开始执行后审批记录自动冻结，不允许修改。</p>
               }
             </section>
 
@@ -610,6 +831,159 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
         border-color: #d58d7e;
         background: #fbece8;
         color: #8e260f;
+      }
+
+      .status.standby {
+        border-color: #c08a2e;
+        background: #fff4dc;
+        color: #7c5000;
+      }
+
+      .notice-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+        margin: 16px 0 0;
+        padding: 12px 16px;
+        border: 1px solid;
+        font-size: 13px;
+      }
+
+      .notice-banner strong {
+        display: block;
+        margin-bottom: 3px;
+      }
+
+      .notice-banner span {
+        color: #5f5f5f;
+      }
+
+      .standby-banner {
+        border-color: #c08a2e;
+        background: #fff4dc;
+      }
+
+      .standby-banner strong {
+        color: #7c5000;
+      }
+
+      .invalid-banner {
+        border-color: #d58d7e;
+        background: #fbece8;
+      }
+
+      .invalid-banner strong {
+        color: #8e260f;
+      }
+
+      .incomplete-banner {
+        border-color: #b48ac2;
+        background: #f4ecf8;
+      }
+
+      .incomplete-banner strong {
+        color: #5f2b78;
+      }
+
+      .constraint-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        margin-top: 16px;
+        background: #e1e1e1;
+      }
+
+      .constraint-card {
+        padding: 14px 16px;
+        background: #fafafa;
+      }
+
+      .constraint-card h3 {
+        margin: 0 0 8px;
+        font-size: 13px;
+      }
+
+      .constraint-card p {
+        margin: 5px 0;
+        font-size: 12px;
+      }
+
+      .constraint-card p.good,
+      .good {
+        color: #245f3d;
+      }
+
+      .constraint-card .good-text {
+        color: #245f3d;
+      }
+
+      .constraint-card .bad,
+      .bad {
+        color: #8e260f;
+      }
+
+      .constraint-card small {
+        display: block;
+        margin-top: 6px;
+        color: #888;
+        font-size: 11px;
+      }
+
+      .prereq-list {
+        margin: 4px 0;
+        padding-left: 18px;
+        font-size: 12px;
+      }
+
+      .prereq-list li {
+        padding: 3px 0;
+      }
+
+      .prereq-list li.done {
+        color: #245f3d;
+      }
+
+      .prereq-list li span {
+        margin-left: 8px;
+        color: #888;
+      }
+
+      .standby-note,
+      .blocker-hint,
+      .prereq-hint,
+      .impact-note {
+        padding: 12px 16px;
+        border-bottom: 1px solid #e3e3e3;
+        font-size: 12px;
+      }
+
+      .standby-note,
+      .prereq-hint {
+        border-left: 3px solid #c08a2e;
+        background: #fff8e8;
+        color: #6b4a06;
+      }
+
+      .blocker-hint {
+        border-left: 3px solid #c21d00;
+        background: #fbece8;
+        color: #8e260f;
+      }
+
+      .prereq-hint span {
+        display: inline-block;
+        margin: 4px 12px 0 0;
+      }
+
+      .prereq-hint span.done {
+        color: #245f3d;
+      }
+
+      .impact-note {
+        border-left: 3px solid #266c91;
+        background: #eaf4f9;
+        color: #1d5877;
       }
 
       .tab-nav {
@@ -889,6 +1263,14 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
         color: #245f3d;
       }
 
+      .standby-message {
+        margin: 18px 0 0;
+        padding: 16px;
+        border-left: 3px solid #c08a2e;
+        background: #fff4dc;
+        color: #7c5000;
+      }
+
       .freeze-strip {
         display: grid;
         grid-template-columns: repeat(4, 1fr);
@@ -938,7 +1320,8 @@ type DetailTab = 'overview' | 'dependency' | 'window' | 'execution' | 'approval'
 
       @media (max-width: 1100px) {
         .detail-heading,
-        .content-grid {
+        .content-grid,
+        .constraint-grid {
           grid-template-columns: 1fr;
         }
 
@@ -979,6 +1362,7 @@ export class ChangeDetailComponent {
   private readonly changeId = this.route.snapshot.paramMap.get('id') ?? '';
 
   readonly changes = this.store.selectSignal(selectAllChanges);
+  readonly blackouts = this.store.selectSignal(selectBlackouts);
   readonly change = computed(() => this.changes().find((item) => item.id === this.changeId));
   readonly selectedTab = signal<DetailTab>('overview');
   readonly editing = signal(false);
@@ -999,12 +1383,27 @@ export class ChangeDetailComponent {
 
   readonly issues = computed(() => {
     const item = this.change();
-    return item ? validateChange(item, this.changes()) : [];
+    return item ? validateChange(item, this.changes(), { blackouts: this.blackouts() }) : [];
   });
 
-  readonly hasBlockers = computed(() =>
-    this.issues().some((issue) => issue.severity === 'blocker'),
-  );
+  readonly blockers = computed(() => this.issues().filter((issue) => issue.severity === 'blocker'));
+
+  readonly hasBlockers = computed(() => this.blockers().length > 0);
+
+  readonly prerequisites = computed(() => {
+    const item = this.change();
+    return item ? prerequisiteChanges(item, this.changes()) : [];
+  });
+
+  readonly waitingPrerequisites = computed(() => {
+    const item = this.change();
+    return item ? unfinishedPrerequisites(item, this.changes()) : [];
+  });
+
+  readonly drifts = computed<ConstraintDrift[]>(() => {
+    const item = this.change();
+    return item ? detectConstraintDrift(item, this.changes(), this.blackouts()) : [];
+  });
 
   readonly pendingStage = computed<ApprovalStage | null>(() => {
     const item = this.change();
@@ -1104,6 +1503,16 @@ export class ChangeDetailComponent {
     this.store.dispatch(ChangeRequestActions.startExecution({ id: this.changeId }));
   }
 
+  promoteFromStandby(): void {
+    if (this.waitingPrerequisites().length === 0) {
+      this.store.dispatch(ChangeRequestActions.promoteFromStandby({ id: this.changeId }));
+    }
+  }
+
+  supplementConstraints(): void {
+    this.store.dispatch(ChangeRequestActions.supplementConstraints({ id: this.changeId }));
+  }
+
   toggleStep(stepId: string): void {
     this.store.dispatch(ChangeRequestActions.toggleStep({ id: this.changeId, stepId }));
   }
@@ -1129,7 +1538,9 @@ export class ChangeDetailComponent {
       result === 'completed'
         ? '观察窗口内指标稳定，变更完成。'
         : '发现不可接受影响，按方案完成回滚。';
-    this.store.dispatch(ChangeRequestActions.completeExecution({ id: this.changeId, result, note }));
+    this.store.dispatch(
+      ChangeRequestActions.completeExecution({ id: this.changeId, result, note }),
+    );
   }
 
   exportRetrospective(): void {
@@ -1154,6 +1565,46 @@ export class ChangeDetailComponent {
       const phase = order.indexOf(left.phase) - order.indexOf(right.phase);
       return phase || left.id.localeCompare(right.id);
     });
+  }
+
+  hittingBlackouts() {
+    const item = this.change();
+    if (!item) {
+      return [];
+    }
+    const resourceIds = item.resources.map((resource) => resource.id);
+    return this.blackouts().filter(
+      (period) =>
+        isWindowInBlackout(item.window, period) && blackoutCoversAnyResource(period, resourceIds),
+    );
+  }
+
+  rollbackLandings(): ChangeStep[] {
+    const item = this.change();
+    return item
+      ? item.steps.filter((step) => step.phase === 'rollback' && step.rollbackLanding)
+      : [];
+  }
+
+  landingIssue(resourceId?: string): boolean {
+    const item = this.change();
+    if (!item || !resourceId) {
+      return false;
+    }
+    return this.blackouts().some(
+      (period) =>
+        isWindowInBlackout(item.window, period) && isResourceInBlackoutScope(period, resourceId),
+    );
+  }
+
+  switchTargets(): ChangeStep[] {
+    const item = this.change();
+    return item ? item.steps.filter((step) => step.phase === 'execute' && step.targetCapacity) : [];
+  }
+
+  isTargetSufficient(step: ChangeStep): boolean {
+    const target = step.targetCapacity;
+    return !!target && target.availableUnits >= target.requiredUnits;
   }
 
   completedSteps(change: ChangeRequest): number {
@@ -1194,8 +1645,11 @@ export class ChangeDetailComponent {
     if (!item) {
       return '-';
     }
+    if (item.status === 'standby') {
+      return '前序未完成，待命中';
+    }
     if (item.status === 'approved') {
-      return '已批准，等待执行';
+      return this.waitingPrerequisites().length ? '前序未完成，启动后待命' : '已批准，等待执行';
     }
     if (['executing', 'completed', 'rolled_back'].includes(item.status)) {
       return '审批已冻结';

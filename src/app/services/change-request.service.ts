@@ -1,9 +1,11 @@
 import { HttpClient } from '@angular/common/http';
 import { inject, Injectable } from '@angular/core';
 import { catchError, Observable, of, tap } from 'rxjs';
+import { BlackoutPeriod } from '../models/blackout.model';
 import { ChangeRequest } from '../models/change-request.model';
 
 const STORAGE_KEY = 'pair-wise-gsb-69-changes';
+const BLACKOUT_STORAGE_KEY = 'pair-wise-gsb-69-blackouts';
 
 @Injectable({ providedIn: 'root' })
 export class ChangeRequestService {
@@ -28,8 +30,31 @@ export class ChangeRequestService {
     );
   }
 
+  loadBlackouts(): Observable<BlackoutPeriod[]> {
+    const localValue = localStorage.getItem(BLACKOUT_STORAGE_KEY);
+    if (localValue) {
+      try {
+        return of(JSON.parse(localValue) as BlackoutPeriod[]);
+      } catch {
+        localStorage.removeItem(BLACKOUT_STORAGE_KEY);
+      }
+    }
+
+    return this.http.get<BlackoutPeriod[]>('/mock/blackouts.json').pipe(
+      tap((blackouts) => this.saveBlackouts(blackouts)),
+      catchError((error: unknown) => {
+        console.error('Failed to load blackout calendar', error);
+        return of([]);
+      }),
+    );
+  }
+
   save(changes: ChangeRequest[]): void {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(changes));
+  }
+
+  saveBlackouts(blackouts: BlackoutPeriod[]): void {
+    localStorage.setItem(BLACKOUT_STORAGE_KEY, JSON.stringify(blackouts));
   }
 
   exportRetrospective(change: ChangeRequest): string {
@@ -44,8 +69,7 @@ export class ChangeRequestService {
       '## 执行偏离',
       ...(change.deviations.length
         ? change.deviations.map(
-            (item) =>
-              `- ${item.recordedAt} ${item.owner} [${item.decision}] ${item.description}`,
+            (item) => `- ${item.recordedAt} ${item.owner} [${item.decision}] ${item.description}`,
           )
         : ['- 无']),
       '',

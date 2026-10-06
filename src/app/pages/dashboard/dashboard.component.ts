@@ -16,6 +16,7 @@ import {
 import { ChangeRequestActions } from '../../store/change-request.actions';
 import {
   selectAllChanges,
+  selectBlackouts,
   selectChangesError,
   selectChangesLoading,
 } from '../../store/change-request.selectors';
@@ -51,7 +52,7 @@ import {
       <article class="danger">
         <span>有阻断项</span>
         <strong>{{ blockedCount() }}</strong>
-        <small>依赖、冲突或回滚风险</small>
+        <small>封网、依赖、回滚落点、容量或冲突</small>
       </article>
       <article>
         <span>今日窗口</span>
@@ -101,11 +102,7 @@ import {
         </clr-select-container>
         <clr-select-container>
           <label>资源类型</label>
-          <select
-            clrSelect
-            [ngModel]="resourceType()"
-            (ngModelChange)="resourceType.set($event)"
-          >
+          <select clrSelect [ngModel]="resourceType()" (ngModelChange)="resourceType.set($event)">
             <option value="all">全部资源</option>
             @for (item of resourceTypes; track item.value) {
               <option [value]="item.value">{{ item.label }}</option>
@@ -146,7 +143,9 @@ import {
                   </a>
                 </td>
                 <td>
-                  <span class="status" [class]="change.status">{{ statusLabel(change.status) }}</span>
+                  <span class="status" [class]="change.status">{{
+                    statusLabel(change.status)
+                  }}</span>
                 </td>
                 <td>
                   <span class="risk" [class]="change.risk">{{ riskLabel(change.risk) }}</span>
@@ -180,10 +179,10 @@ import {
       <div class="panel-heading">
         <div>
           <h2>窗口甘特视图</h2>
-          <span>红色条表示共享资源窗口冲突</span>
+          <span>红色条表示共享资源窗口冲突，斜纹区为封网日历时段</span>
         </div>
       </div>
-      <app-window-gantt [changes]="filteredChanges()" />
+      <app-window-gantt [changes]="filteredChanges()" [blackouts]="blackouts()" />
     </section>
   `,
   styles: [
@@ -353,6 +352,12 @@ import {
         background: #e8f5ed;
       }
 
+      .status.standby {
+        border-color: #c08a2e;
+        color: #7c5000;
+        background: #fff4dc;
+      }
+
       .status.submitted {
         border-color: #5688a5;
         color: #215a78;
@@ -419,6 +424,7 @@ export class DashboardComponent {
   private readonly store = inject(Store);
 
   readonly changes = this.store.selectSignal(selectAllChanges);
+  readonly blackouts = this.store.selectSignal(selectBlackouts);
   readonly loading = this.store.selectSignal(selectChangesLoading);
   readonly error = this.store.selectSignal(selectChangesError);
 
@@ -457,12 +463,16 @@ export class DashboardComponent {
   readonly blockedCount = computed(
     () =>
       this.changes().filter((change) =>
-        validateChange(change, this.changes()).some((issue) => issue.severity === 'blocker'),
+        validateChange(change, this.changes(), { blackouts: this.blackouts() }).some(
+          (issue) => issue.severity === 'blocker',
+        ),
       ).length,
   );
 
-  readonly todayWindowCount = computed(() =>
-    this.filteredChanges().filter((change) => change.window.start.startsWith('2026-09-29')).length,
+  readonly todayWindowCount = computed(
+    () =>
+      this.filteredChanges().filter((change) => change.window.start.startsWith('2026-09-29'))
+        .length,
   );
 
   reload(): void {
@@ -475,7 +485,9 @@ export class DashboardComponent {
 
   issueCount(changeId: string): number {
     const change = this.changes().find((item) => item.id === changeId);
-    return change ? validateChange(change, this.changes()).length : 0;
+    return change
+      ? validateChange(change, this.changes(), { blackouts: this.blackouts() }).length
+      : 0;
   }
 
   statusLabel(status: ChangeStatus): string {

@@ -4,7 +4,7 @@ import { Store } from '@ngrx/store';
 import { catchError, map, of, switchMap, tap, withLatestFrom } from 'rxjs';
 import { ChangeRequestService } from '../services/change-request.service';
 import { ChangeRequestActions } from './change-request.actions';
-import { selectAllChanges } from './change-request.selectors';
+import { selectAllChanges, selectBlackouts } from './change-request.selectors';
 
 @Injectable()
 export class ChangeRequestEffects {
@@ -30,6 +30,24 @@ export class ChangeRequestEffects {
     ),
   );
 
+  loadBlackouts$ = createEffect(() =>
+    this.actions$.pipe(
+      ofType(ChangeRequestActions.loadBlackouts),
+      switchMap(() =>
+        this.service.loadBlackouts().pipe(
+          map((blackouts) => ChangeRequestActions.loadBlackoutsSuccess({ blackouts })),
+          catchError((error: unknown) =>
+            of(
+              ChangeRequestActions.loadBlackoutsFailure({
+                error: error instanceof Error ? error.message : '封网日历加载失败',
+              }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   persistChanges$ = createEffect(
     () =>
       this.actions$.pipe(
@@ -41,12 +59,24 @@ export class ChangeRequestEffects {
           ChangeRequestActions.approveStage,
           ChangeRequestActions.rejectStage,
           ChangeRequestActions.startExecution,
+          ChangeRequestActions.promoteFromStandby,
+          ChangeRequestActions.supplementConstraints,
           ChangeRequestActions.toggleStep,
           ChangeRequestActions.recordDeviation,
           ChangeRequestActions.completeExecution,
         ),
         withLatestFrom(this.store.select(selectAllChanges)),
         tap(([, changes]) => this.service.save(changes)),
+      ),
+    { dispatch: false },
+  );
+
+  persistBlackouts$ = createEffect(
+    () =>
+      this.actions$.pipe(
+        ofType(ChangeRequestActions.loadBlackoutsSuccess),
+        withLatestFrom(this.store.select(selectBlackouts)),
+        tap(([, blackouts]) => this.service.saveBlackouts(blackouts)),
       ),
     { dispatch: false },
   );

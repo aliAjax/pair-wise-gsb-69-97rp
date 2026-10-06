@@ -1,0 +1,26 @@
+[
+  {
+    "id": "BO-2026-NATIONAL-DAY",
+    "name": "国庆封网（生产大区）",
+    "start": "2026-10-01T00:00",
+    "end": "2026-10-08T00:00",
+    "scopeResourceIds": [],
+    "reason": "国庆保障期，全网禁止非紧急生产变更。"
+  },
+  {
+    "id": "BO-2026-PAYMENT-FREEZE",
+    "name": "支付链路专项封网",
+    "start": "2026-09-29T20:00",
+    "end": "2026-10-01T08:00",
+    "scopeResourceIds": ["rack-c1", "svc-risk"],
+    "reason": "支付与风控链路专项保障，C1 机柜与风控网关只读运行。"
+  },
+  {
+    "id": "BO-2026-CORE-A-STANDBY",
+    "name": "核心交换 A 平面回退位封网",
+    "start": "2026-09-30T00:00",
+    "end": "2026-10-01T00:00",
+    "scopeResourceIds": ["sw-core-a", "rack-a3"],
+    "reason": "A 平面固件升级期间，A3 机柜与原核心交换机不接受回退流量。"
+  }
+]
